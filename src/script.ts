@@ -1,24 +1,38 @@
-// ============================================================================================== CONSTANTS & EXTENSIONS
+// ============================================================================== CONSTANTS, DEFINITIONS, AND EXTENSIONS
 
-// Define some constants (App Client ID, URL params parsed from URL,
-// auth code parsed from params)
+// Define globals
 const spotifyClientId = "b5af9f02259b418cb6e80425b55a6226";
+const pwKey = "Qx1wavydstRGvUBn3EkZz6D3RvrX2Ajk";
 const params = new URLSearchParams(window.location.search);
 const spotifyCode = params.get("code");
 const default_timeframe = "medium_term";
-const timeframeSelector = document.getElementById("timeframe")
-timeframeSelector?.addEventListener("change", selectListener);
+
+// Used specifically to avoid having to use a global for user coords
+let getLocationPromise = new Promise((resolve, reject) => {
+    if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(function (position) {
+            let lat = position.coords.latitude;
+            let long = position.coords.longitude;
+
+            resolve({latitude: lat,
+                longitude: long});
+        })
+    } else {
+        reject("Location services are not supported by this browser");
+    }
+})
 
 if (!spotifyCode) {
     spotifyRedirectToAuthCodeFlow(spotifyClientId);
 } else {
-    spotifyPullStatsAndPopulate(spotifyClientId, spotifyCode, default_timeframe);
+    spotifyPullStats(spotifyClientId, spotifyCode, default_timeframe);
+    pwPullForecast(pwKey);
 }
 
 // ======================================================================================================= AUTHORISATION
 
 // Begin auth flow, accepts app client ID.
-export async function spotifyRedirectToAuthCodeFlow(spotifyClientId: string) {
+async function spotifyRedirectToAuthCodeFlow(spotifyClientId: string) {
 
     // Define 128-char verifier and invoke code challenge with this verifier
     const verifier = generateCodeVerifier(128);
@@ -95,25 +109,6 @@ async function getAccessToken(spotifyClientId: string, spotifyCode: string): Pro
 
 // ===================================================================== SPOTIFY
 
-// Fetch profile data, invoked after getting accessToken
-// So /v1/me will direct to user's profile
-async function fetchProfile(spotifyToken: string): Promise<any> {
-    const result = await fetch("https://api.spotify.com/v1/me", {
-        method: "GET", headers: { Authorization: `Bearer ${spotifyToken}` }
-    });
-
-    return await result.json();
-}
-
-// Fetch user's recently played tracks
-async function fetchTopTracks(spotifyToken: string, timeframe: string): Promise<any> {
-    const result = await fetch(`https://api.spotify.com/v1/me/top/tracks?time_range=${timeframe}&limit=5&offset=0`, {
-        method: "GET", headers: { Authorization: `Bearer ${spotifyToken}` }
-    });
-
-    return await result.json();
-}
-
 // Fetch user's top artists, find most common genres among these
 async function fetchTopArtists(spotifyToken: string, timeframe: string): Promise<any> {
     const result = await fetch(`https://api.spotify.com/v1/me/top/artists?time_range=${timeframe}&limit=10&offset=0`, {
@@ -125,12 +120,12 @@ async function fetchTopArtists(spotifyToken: string, timeframe: string): Promise
 
 // ============================================================== PIRATE WEATHER
 
-async function pwFetchWeather(pwKey: string, pwLat: string, pwLong: string) {
+// Fetch forecast for given coordinates
+async function pwFetchWeather(pwKey: string, pwLat: string, pwLong: string): Promise<any> {
     const result = await fetch(`https://api.pirateweather.net/forecast/${pwKey}/${pwLat},${pwLong}`, {
-        method: "GET", headers: { Authorization: `Bearer ${pwKey}` }
+        method: "GET"
     });
-
-    console.log(result);
+    return await result.json()
 }
 
 
@@ -138,8 +133,7 @@ async function pwFetchWeather(pwKey: string, pwLat: string, pwLong: string) {
 // =================================================================================================== DATA MANIPULATION
 
 async function extractTopGenre(token: string, timeframe: string) {
-    var genres = new Array<string>;
-    var frequency = {};
+    let genres: string[] = []
 
     // Get top artists JSON
     const topArtists = await fetchTopArtists(token, timeframe);
@@ -148,12 +142,18 @@ async function extractTopGenre(token: string, timeframe: string) {
     for (let i = 0; i < topArtists.items.length; i++) {
         genres.push(topArtists.items[i].genres);
     }
+    
     genres = genres.flat();
+    return getListMode(genres);
+}
 
-    // Order genres by frequency, remove dupes
-    genres = genres.sort();
-    genres.forEach(function(value) { frequency[value] = 0; });
-    var uniques = genres.filter(function(value) {
+// Order list of strings by frequency, remove dupes
+function getListMode(list: Array<string>) {
+    var frequency = {}; 
+    list = list.sort();
+    list.forEach(function(value) { frequency[value] = 0; });
+    
+    var uniques = list.filter(function(value) {
         return ++frequency[value] == 1;
     });
 
@@ -162,46 +162,55 @@ async function extractTopGenre(token: string, timeframe: string) {
     });
 }
 
+function getListAvg(list: Array<number>) {
+    const sum = list.reduce((a, b) => a + b, 0);
+    const avg = sum / list.length;
+    return avg;
+}
+
+// Make stats readable
+function formatStats(source: string, info: any) {
+    if (source == "music") {
+        console.log("6 MONTH TOP GENRES")
+        console.log(info.slice(0, 3));
+    } else {
+        // Get average temperature for upcoming week
+        let precipChance: number[] = [];
+        let tempsMax: number[] = [];
+        let tempsMin: number[] = [];
+        let tempsAvg: number[] = [];
+        for (let i = 0; i < info.data.length; i++) {
+            precipChance.push(info.data[i].precipProbability);
+            tempsMax.push(info.data[i].apparentTemperatureHigh);
+            tempsMin.push(info.data[i].apparentTemperatureLow);
+        }
+        for (let i = 0; i < tempsMax.length; i++) {
+            tempsAvg.push((tempsMax[i] + tempsMin[i]) / 2)
+        }
+        const avgTemp: number =+ (((getListAvg(tempsAvg) || 0 )-32)*(5/9)).toFixed(2);
+        var avgPrec: number =+ getListAvg(precipChance).toFixed(2);
+        avgPrec = avgPrec * 100;
+        console.log("UPCOMING WEEK AVG TEMP(C) / CHANCE OF RAIN(%)")
+        console.log(avgTemp);
+        console.log(avgPrec);
+    }
+}
+
 
 
 // ========================================================================================================== UI DRAWING
 
-export async function spotifyPullStatsAndPopulate(clientId: string, code: string, timeframe: string) {
+// Init call chain for Spotify data
+async function spotifyPullStats(clientId: string, code: string, timeframe: string) {
     const accessToken = await getAccessToken(clientId, code);
-    const profile = await fetchProfile(accessToken);
-    const topTracks = await fetchTopTracks(accessToken, timeframe);
     const topGenre = await extractTopGenre(accessToken, timeframe);
-    populateUI(profile, topTracks, topGenre);
+    formatStats("music",topGenre);
 }
 
-function selectListener(selectElement: HTMLElement) {
-    spotifyPullStatsAndPopulate(spotifyClientId, spotifyCode, selectElement.target.value)
-}
-
-// Populate html spans by element ID
-// Resize profile image
-function populateUI(profile: any, topTracks: any, topGenre: any) {
-    document.getElementById("displayName")!.innerText = profile.display_name;
-    if (profile.images[0]) {
-        const profileImage = new Image(75, 75);
-        profileImage.src = profile.images[0].url;
-        document.getElementById("avatar")!.appendChild(profileImage);
-    }
-    document.getElementById("topTracks1")!.innerText = topTracks.items[0].name;
-    document.getElementById("topTracks2")!.innerText = topTracks.items[1].name;
-    document.getElementById("topTracks3")!.innerText = topTracks.items[2].name;
-    document.getElementById("topTracks4")!.innerText = topTracks.items[3].name;
-    document.getElementById("topTracks5")!.innerText = topTracks.items[4].name;
-
-    document.getElementById("topTracks1Artist")!.innerText = topTracks.items[0].artists[0].name;
-    document.getElementById("topTracks2Artist")!.innerText = topTracks.items[1].artists[0].name;
-    document.getElementById("topTracks3Artist")!.innerText = topTracks.items[2].artists[0].name;
-    document.getElementById("topTracks4Artist")!.innerText = topTracks.items[3].artists[0].name;
-    document.getElementById("topTracks5Artist")!.innerText = topTracks.items[4].artists[0].name;
-
-    document.getElementById("topGenres1")!.innerText = topGenre[0];
-    document.getElementById("topGenres2")!.innerText = topGenre[1];
-    document.getElementById("topGenres3")!.innerText = topGenre[2];
-    document.getElementById("topGenres4")!.innerText = topGenre[3];
-    document.getElementById("topGenres5")!.innerText = topGenre[4];
+// Init call chain for weather data
+async function pwPullForecast(pwKey: string) {
+    getLocationPromise.then(async (location) => {
+        const weatherData = await pwFetchWeather(pwKey,location.latitude,location.longitude);
+        formatStats("weather",weatherData.daily);
+    })
 }
